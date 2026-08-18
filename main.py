@@ -83,24 +83,20 @@ def extract_product_meta(title: str):
 
     return brand, category
 
-# Static HTML DuckDuckGo Scraper (High Speed)
+# DuckDuckGo Scraper utilizing Crawl4AI AsyncWebCrawler
 async def fetch_ddg_results(query: str) -> list:
     encoded_query = urllib.parse.quote(query)
     url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-    }
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            response = await client.get(url, headers=headers)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
+        async with AsyncWebCrawler() as crawler:
+            result = await crawler.arun(url=url)
+            if result.success:
+                soup = BeautifulSoup(result.html, 'html.parser')
                 results = []
-                for result in soup.select('.result'):
-                    title_elem = result.select_one('.result__title a')
-                    snippet_elem = result.select_one('.result__snippet')
-                    url_elem = result.select_one('.result__url')
+                for element in soup.select('.result'):
+                    title_elem = element.select_one('.result__title a')
+                    snippet_elem = element.select_one('.result__snippet')
 
                     if title_elem and title_elem.get('href'):
                         title = title_elem.get_text().strip()
@@ -120,8 +116,9 @@ async def fetch_ddg_results(query: str) -> list:
                         })
                 return results
     except Exception as e:
-        print(f"Error fetching DuckDuckGo results: {e}")
+        print(f"Error fetching DuckDuckGo results via Crawl4AI: {e}")
     return []
+
 
 # Crawl4AI Deep Scraper Helper (Can be used for background crawling or deep analysis)
 async def crawl_deep_page(target_url: str):
