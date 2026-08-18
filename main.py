@@ -168,27 +168,24 @@ async def crawl_deep_page(target_url: str):
 
 def generate_fallback_listings(query: str) -> dict:
     lower_query = query.lower()
-    base_price = 15000.0
-    title = query
+    
+    # Estimate a realistic base price based on keywords in the user's search
+    base_price = 499.0
+    if "laptop" in lower_query or "macbook" in lower_query:
+        base_price = 55000.0
+    elif "iphone" in lower_query or "pixel" in lower_query or "galaxy s" in lower_query:
+        base_price = 74999.0
+    elif "phone" in lower_query or "mobile" in lower_query or "smartphone" in lower_query:
+        base_price = 19999.0
+    elif "sony" in lower_query or "headphones" in lower_query or "earbuds" in lower_query:
+        base_price = 15990.0
+    elif "milk" in lower_query or "bread" in lower_query:
+        base_price = 68.0
+    elif "atta" in lower_query or "rice" in lower_query:
+        base_price = 280.0
 
-    if "iphone" in lower_query:
-        title = "Apple iPhone 15 (128 GB)"
-        base_price = 69900.0
-    elif "sony" in lower_query or "headphones" in lower_query:
-        title = "Sony WH-1000XM5 Wireless Headphones"
-        base_price = 29990.0
-    elif "milk" in lower_query:
-        title = "Amul Taaza Toned Milk (1L)"
-        base_price = 72.0
-    elif "atta" in lower_query:
-        title = "Aashirvaad Shudh Chakki Atta (5kg)"
-        base_price = 255.0
-    elif "phone" in lower_query or "mobile" in lower_query or "pixel" in lower_query or "google" in lower_query:
-        title = "Google Pixel 8 (128 GB)" if "pixel" in lower_query else "Smart Android 5G Smartphone"
-        base_price = 75999.0 if "pixel" in lower_query else 19999.0
-    else:
-        title = query.title()
-        base_price = 499.0
+    # Always preserve the exact capitalized query title
+    title = query.title()
 
     sellers = [
         {"name": "Amazon India", "path": "https://www.amazon.in/s?k="},
