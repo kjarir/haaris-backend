@@ -1,6 +1,4 @@
 fastapi==0.109.0
 uvicorn==0.27.0
 httpx==0.26.0
-beautifulsoup4==4.12.3
-crawl4ai==0.3.8
 pydantic==2.6.1

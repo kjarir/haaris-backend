@@ -6,12 +6,10 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 
-app = FastAPI(title="Smart Price Aggregator Static Dataset Backend")
+app = FastAPI(title="Haaris - Live Price Aggregator")
 
-# Enable CORS for Flutter Client
+# CORS for Flutter client
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,14 +18,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ────────────────────────────────────────────────────
+# Pydantic Models
+# ────────────────────────────────────────────────────
+
 class Product(BaseModel):
     id: str
     title: str
     brand: str
     category: str
     imageUrl: str
-    verified: bool  # Displays whether the product is hand-verified or bulk-generated
-    specs: Optional[Dict[str, str]] = None  # Key-value maps for product specifications
+    verified: bool
+    specs: Optional[Dict[str, str]] = None
 
 class Listing(BaseModel):
     id: str
@@ -37,214 +39,206 @@ class Listing(BaseModel):
     url: str
     inStock: bool
     lastCheckedAt: str
-    linkType: str = "search"  # "direct" or "search"
+    linkType: str = "search"   # "direct" | "search"
 
 class SearchResponse(BaseModel):
     product: Optional[Product]
     listings: List[Listing]
 
-# Merged Database Store (Fallback database)
-merged_database = []
+# ────────────────────────────────────────────────────
+# Fallback Local Dataset (loaded at startup)
+# ────────────────────────────────────────────────────
 
-# Load Hand-Curated Verified Dataset
-MANUAL_PATH = os.path.join(os.path.dirname(__file__), "manual_seed_dataset.json")
-try:
-    with open(MANUAL_PATH, "r") as f:
-        manual_data = json.load(f)
-        for item in manual_data.get("products", []):
-            item["verified"] = True
-            merged_database.append(item)
-    print(f"Loaded {len(manual_data.get('products', []))} hand-verified products.")
-except Exception as e:
-    print(f"Error loading manual verified dataset: {e}")
+_local_db: List[dict] = []
 
-# Load Bulk Kaggle Generated Dataset
-KAGGLE_PATH = os.path.join(os.path.dirname(__file__), "kaggle_seed_dataset_generated.json")
-try:
-    if os.path.exists(KAGGLE_PATH):
-        with open(KAGGLE_PATH, "r") as f:
-            kaggle_data = json.load(f)
-            for item in kaggle_data.get("products", []):
-                item["verified"] = False
-                merged_database.append(item)
-        print(f"Loaded {len(kaggle_data.get('products', []))} bulk generated products.")
-    else:
-        print("Generated Kaggle dataset file not found. Run scripts/build_dataset.py first.")
-except Exception as e:
-    print(f"Error loading generated Kaggle dataset: {e}")
+def _load_local_db():
+    base = os.path.dirname(__file__)
+    for fname, verified in [
+        ("manual_seed_dataset.json", True),
+        ("kaggle_seed_dataset_generated.json", False),
+    ]:
+        path = os.path.join(base, fname)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for item in data.get("products", []):
+                item["verified"] = verified
+                _local_db.append(item)
+            print(f"[startup] Loaded {len(data.get('products', []))} products from {fname}")
+        except Exception as e:
+            print(f"[startup] Could not load {fname}: {e}")
 
-# SearchApi.io Config
+_load_local_db()
+
+# ────────────────────────────────────────────────────
+# SearchApi.io config
+# ────────────────────────────────────────────────────
+
 SEARCHAPI_KEY = "r7MunZoUvuNCepWGptEyjApy"
 SEARCHAPI_URL = "https://www.searchapi.io/api/v1/search"
 
-# Crawl4AI Configuration for Background Crawls (Bonus / Reference)
-product_schema = {
-    "name": "E-Commerce Product details",
-    "baseSelector": "body",
-    "fields": [
-        {"name": "title", "selector": "h1", "type": "text"},
-        {"name": "price", "selector": ".a-price-whole, ._30jeq3", "type": "text"},
-        {"name": "in_stock", "selector": "#availability", "type": "text"}
-    ]
-}
+# Keyword → category mapping used when building the Product object from live results
+_CATEGORY_RULES = [
+    ({"headphone", "earbud", "earphone", "speaker", "soundbar", "audio", "buds"}, "Electronics / Audio"),
+    ({"tv", "television", "qled", "oled", "monitor", "display"}, "Electronics / TV"),
+    ({"laptop", "notebook", "macbook"}, "Electronics / Laptops"),
+    ({"milk", "atta", "rice", "oil", "dal", "masala", "biscuit", "grocery",
+      "chocolate", "snack", "beverage", "chai", "coffee"}, "Grocery & Essentials"),
+    ({"watch", "smartwatch", "band", "fitness tracker"}, "Electronics / Wearables"),
+    ({"camera", "dslr", "lens", "mirrorless"}, "Electronics / Cameras"),
+]
 
-browser_config = BrowserConfig(
-    headless=True,
-    ignore_https_errors=True
-)
+def _infer_category(query: str) -> str:
+    q = query.lower()
+    for keywords, cat in _CATEGORY_RULES:
+        if any(kw in q for kw in keywords):
+            return cat
+    return "Electronics / Mobiles"
 
-crawler_run_config = CrawlerRunConfig(
-    extraction_strategy=JsonCssExtractionStrategy(schema=product_schema),
-    word_count_threshold=10,
-    always_by_pass_cache=True
-)
+def _extract_specs(title: str) -> Dict[str, str]:
+    specs: Dict[str, str] = {}
+    t = title.lower()
+    for ram in ["4gb", "6gb", "8gb", "12gb", "16gb", "32gb", "4 gb", "6 gb", "8 gb"]:
+        if ram in t:
+            specs["RAM"] = ram.replace(" ", "").upper()
+            break
+    for storage in ["64gb", "128gb", "256gb", "512gb", "1tb", "2tb"]:
+        if storage in t:
+            specs["Storage"] = storage.upper()
+            break
+    return specs
 
-async def background_crawl_job(target_url: str):
-    """
-    Scheduled background crawler task using Crawl4AI JsonCssExtractionStrategy.
-    """
-    print(f"Starting scheduled crawl on: {target_url}")
-    async with AsyncWebCrawler(config=browser_config) as crawler:
-        result = await crawler.arun(url=target_url, config=crawler_run_config)
-        if result.success:
-            print("Extracted Data:", result.extracted_content)
-            return result.extracted_content
-    return None
+# ────────────────────────────────────────────────────
+# Local fallback search (token-scored)
+# ────────────────────────────────────────────────────
 
-def fallback_local_search(query: str) -> SearchResponse:
-    print(f"Falling back to local dataset query match for: '{query}'")
-    best_match = None
-    highest_score = 0
-    query_tokens = set(query.split())
+def _local_search(query: str) -> SearchResponse:
+    print(f"[fallback] Searching local DB for: '{query}'")
+    tokens = query.lower().split()
+    best, best_score = None, 0
 
-    for item in merged_database:
-        title_lower = item["title"].lower()
-        brand_lower = item["brand"].lower()
-        id_lower = item["id"].lower()
-
+    for item in _local_db:
         score = 0
-        for token in query_tokens:
-            if token in title_lower:
+        title = item.get("title", "").lower()
+        brand = item.get("brand", "").lower()
+        for tok in tokens:
+            if tok in title:
                 score += 2
-            if token in brand_lower:
+            if tok in brand:
                 score += 1
-            if token in id_lower:
-                score += 2
+        if score > best_score:
+            best_score = score
+            best = item
 
-        if score > highest_score:
-            highest_score = score
-            best_match = item
-
-    if best_match and highest_score >= 2:
+    if best and best_score >= 2:
         product = Product(
-            id=best_match["id"],
-            title=best_match["title"],
-            brand=best_match["brand"],
-            category=best_match["category"],
-            imageUrl=best_match["imageUrl"],
-            verified=best_match["verified"],
-            specs=best_match.get("specs", {})
+            id=best["id"],
+            title=best["title"],
+            brand=best["brand"],
+            category=best["category"],
+            imageUrl=best["imageUrl"],
+            verified=best.get("verified", False),
+            specs=best.get("specs", {}),
         )
         listings = [
             Listing(
                 id=l["id"],
                 sellerName=l["sellerName"],
-                price=l["price"],
-                currency=l["currency"],
+                price=float(l["price"]),
+                currency=l.get("currency", "INR"),
                 url=l["url"],
-                inStock=l["inStock"],
+                inStock=l.get("inStock", True),
                 lastCheckedAt=l["lastCheckedAt"],
-                linkType=l.get("linkType", "search")
-            ) for l in best_match.get("listings", [])
+                linkType=l.get("linkType", "search"),
+            )
+            for l in best.get("listings", [])
         ]
         return SearchResponse(product=product, listings=listings)
 
     return SearchResponse(product=None, listings=[])
 
+# ────────────────────────────────────────────────────
+# Main live search endpoint
+# ────────────────────────────────────────────────────
+
 @app.get("/search", response_model=SearchResponse)
-async def search_dataset(q: str = Query(..., description="Product query to search")):
-    query = q.strip().lower()
-    print(f"Received live shopping search request: '{query}'")
-
+async def search(q: str = Query(..., description="Product search query")):
+    query = q.strip()
     if not query:
-        raise HTTPException(status_code=400, detail="Search query is required")
+        raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    # Try Live SearchApi.io Shopping Query first
+    print(f"[search] '{query}'")
+
+    # ── 1. Try SearchApi.io Google Shopping (India) ──────────────────────────
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            params = {
-                "engine": "google_shopping",
-                "q": query,
-                "gl": "in",
-                "hl": "en",
-                "api_key": SEARCHAPI_KEY
-            }
-            response = await client.get(SEARCHAPI_URL, params=params)
-            
-            if response.status_code == 200:
-                data = response.json()
-                shopping_results = data.get("shopping_results", [])
-                
-                if shopping_results:
-                    first_item = shopping_results[0]
-                    # Guess category dynamically based on search keywords
-                    category = "Electronics / Mobiles"
-                    if "headphone" in query or "earbud" in query or "audio" in query:
-                        category = "Electronics / Audio"
-                    elif "tv" in query or "television" in query:
-                        category = "Electronics / TV"
-                    elif "milk" in query or "atta" in query or "oil" in query or "chocolate" in query or "grocery" in query:
-                        category = "Grocery & Essentials"
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            resp = await client.get(
+                SEARCHAPI_URL,
+                params={
+                    "engine": "google_shopping",
+                    "q": query,
+                    "gl": "in",
+                    "hl": "en",
+                    "api_key": SEARCHAPI_KEY,
+                },
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            results = data.get("shopping_results", [])
+            if results:
+                first = results[0]
+                category = _infer_category(query)
+                specs = _extract_specs(first.get("title", ""))
 
-                    # Generate spec tags based on title if possible
-                    specs = {}
-                    title_lower = first_item.get("title", "").lower()
-                    for ram_val in ["4gb", "8gb", "12gb", "16gb", "32gb"]:
-                        if ram_val in title_lower:
-                            specs["RAM"] = ram_val.upper()
-                            break
-                    for storage_val in ["64gb", "128gb", "256gb", "512gb", "1tb"]:
-                        if storage_val in title_lower:
-                            specs["Storage"] = storage_val.upper()
-                            break
+                product = Product(
+                    id=f"live_{first.get('product_id', 'unknown')}",
+                    title=first.get("title", query.title()),
+                    brand=first.get("seller", "Various"),
+                    category=category,
+                    imageUrl=first.get("thumbnail", ""),
+                    verified=True,   # Real-time from Google index
+                    specs=specs,
+                )
 
-                    product = Product(
-                        id=f"live_{first_item.get('product_id', 'id')}",
-                        title=first_item.get("title", query.title()),
-                        brand=first_item.get("seller", "Generic"),
-                        category=category,
-                        imageUrl=first_item.get("thumbnail", ""),
-                        verified=True, # Sourced in real-time from active Google index!
-                        specs=specs
+                listings: List[Listing] = []
+                for i, item in enumerate(results):
+                    price = item.get("extracted_price")
+                    if not price:
+                        continue
+                    url = item.get("product_link") or item.get("offers_link") or ""
+                    listings.append(
+                        Listing(
+                            id=f"live_{i}_{item.get('product_id', i)}",
+                            sellerName=item.get("seller", "Seller"),
+                            price=float(price),
+                            currency="INR",
+                            url=url,
+                            inStock=True,
+                            lastCheckedAt=datetime.utcnow().isoformat() + "Z",
+                            linkType="direct",
+                        )
                     )
 
-                    listings = []
-                    for index, item in enumerate(shopping_results):
-                        extracted_price = item.get("extracted_price")
-                        if not extracted_price:
-                            continue
-                        
-                        listings.append(Listing(
-                            id=f"live_offer_{index}_{item.get('product_id', '')}",
-                            sellerName=item.get("seller", "Google Shopping Seller"),
-                            price=float(extracted_price),
-                            currency="INR",
-                            url=item.get("product_link") or item.get("offers_link") or "",
-                            inStock=True,
-                            lastCheckedAt=datetime.now().isoformat(),
-                            linkType="direct" # Leads directly to specific product page
-                        ))
-                    
-                    if listings:
-                        print(f"Successfully returned {len(listings)} live shopping listings from Google.")
-                        return SearchResponse(product=product, listings=listings)
+                if listings:
+                    print(f"[search] Live: {len(listings)} listings from Google Shopping")
+                    return SearchResponse(product=product, listings=listings)
+        else:
+            print(f"[search] SearchApi returned {resp.status_code}: {resp.text[:200]}")
 
-    except Exception as e:
-        print(f"Live SearchApi query failed: {e}")
+    except Exception as exc:
+        print(f"[search] Live query error: {exc}")
 
-    # Fallback to local database
-    return fallback_local_search(query)
+    # ── 2. Fallback to local database ────────────────────────────────────────
+    return _local_search(query)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "db_products": len(_local_db)}
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=3050, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=3050, reload=False)
