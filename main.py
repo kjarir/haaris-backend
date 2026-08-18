@@ -83,6 +83,42 @@ def extract_product_meta(title: str):
 
     return brand, category
 
+# Helper to extract actual product image from listing page (OpenGraph or img tags)
+async def fetch_product_image(url: str) -> Optional[str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=4.0) as client:
+            response = await client.get(url, headers=headers, follow_redirects=True)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Check OpenGraph Image tag
+                og_img = soup.find("meta", property="og:image")
+                if og_img and og_img.get("content"):
+                    return og_img["content"]
+                
+                # Check twitter image tag
+                tw_img = soup.find("meta", name="twitter:image")
+                if tw_img and tw_img.get("content"):
+                    return tw_img["content"]
+
+                # E-commerce platform specific main selectors
+                if "amazon.in" in url or "amazon.com" in url:
+                    img_tag = soup.find("img", id="landingImage") or soup.find("img", id="main-image")
+                    if img_tag and img_tag.get("src"):
+                        return img_tag["src"]
+                elif "flipkart.com" in url:
+                    img_tag = soup.find("img", class_="_396cs") or soup.find("img", class_="_2rPIXM")
+                    if img_tag and img_tag.get("src"):
+                        return img_tag["src"]
+    except Exception as e:
+        print(f"Error extracting image from {url}: {e}")
+    return None
+
 # HTTPX based fetcher to prevent Playwright hangs on Render container
 async def fetch_ddg_results(query: str) -> list:
     encoded_query = urllib.parse.quote(query)
@@ -203,6 +239,7 @@ async def search_prices(q: str = Query(..., description="Product query to search
     listings = []
     matched_product_title = query
     highest_word_overlap = 0
+    primary_listing_url = None
 
     for item in raw_results:
         lower_url = item["url"].lower()
@@ -231,6 +268,7 @@ async def search_prices(q: str = Query(..., description="Product query to search
             if words_len > highest_word_overlap:
                 highest_word_overlap = words_len
                 matched_product_title = item["title"].split("|")[0].split("(")[0].strip()
+                primary_listing_url = item["url"]
 
         listings.append(
             Listing(
@@ -266,13 +304,19 @@ async def search_prices(q: str = Query(..., description="Product query to search
 
     brand, category = extract_product_meta(matched_product_title)
 
-    imageUrl = "https://images.unsplash.com/photo-1546213290-e1b7610339e5?auto=format&fit=crop&q=80&w=200"
-    if "Mobiles" in category:
-        imageUrl = "https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?auto=format&fit=crop&q=80&w=200"
-    elif "Audio" in category:
-        imageUrl = "https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&q=80&w=200"
-    elif "Grocery" in category:
-        imageUrl = "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&q=80&w=200"
+    imageUrl = None
+    if primary_listing_url:
+        print(f"Fetching real-time product image from primary url: {primary_listing_url}")
+        imageUrl = await fetch_product_image(primary_listing_url)
+
+    if not imageUrl:
+        imageUrl = "https://images.unsplash.com/photo-1546213290-e1b7610339e5?auto=format&fit=crop&q=80&w=200"
+        if "Mobiles" in category:
+            imageUrl = "https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?auto=format&fit=crop&q=80&w=200"
+        elif "Audio" in category:
+            imageUrl = "https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&q=80&w=200"
+        elif "Grocery" in category:
+            imageUrl = "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&q=80&w=200"
 
     product = Product(
         id=query.lower().replace(" ", "_"),
