@@ -41,7 +41,7 @@ class SearchResponse(BaseModel):
     product: Optional[Product]
     listings: List[Listing]
 
-# Regex helper to parse price strings (e.g. ₹69,900 or Rs. 29,990)
+# Regex helper to parse price strings
 def extract_price(text: str) -> Optional[float]:
     if not text:
         return None
@@ -58,7 +58,7 @@ def extract_price(text: str) -> Optional[float]:
 
 def extract_product_meta(title: str):
     brand = "Generic"
-    lower_title = title.toLowerCase() if hasattr(title, 'toLowerCase') else title.lower()
+    lower_title = title.lower()
 
     if "apple" in lower_title or "iphone" in lower_title:
         brand = "Apple"
@@ -83,20 +83,25 @@ def extract_product_meta(title: str):
 
     return brand, category
 
-# DuckDuckGo Scraper utilizing Crawl4AI AsyncWebCrawler
+# HTTPX based fetcher to prevent Playwright hangs on Render container
 async def fetch_ddg_results(query: str) -> list:
     encoded_query = urllib.parse.quote(query)
     url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
 
     try:
-        async with AsyncWebCrawler() as crawler:
-            result = await crawler.arun(url=url)
-            if result.success:
-                soup = BeautifulSoup(result.html, 'html.parser')
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.get(url, headers=headers)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, 'html.parser')
                 results = []
-                for element in soup.select('.result'):
-                    title_elem = element.select_one('.result__title a')
-                    snippet_elem = element.select_one('.result__snippet')
+                for result in soup.select('.result'):
+                    title_elem = result.select_one('.result__title a')
+                    snippet_elem = result.select_one('.result__snippet')
 
                     if title_elem and title_elem.get('href'):
                         title = title_elem.get_text().strip()
@@ -116,11 +121,10 @@ async def fetch_ddg_results(query: str) -> list:
                         })
                 return results
     except Exception as e:
-        print(f"Error fetching DuckDuckGo results via Crawl4AI: {e}")
+        print(f"Error fetching DuckDuckGo results: {e}")
     return []
 
-
-# Crawl4AI Deep Scraper Helper (Can be used for background crawling or deep analysis)
+# Crawl4AI Deep Scraper integration is available here for custom scraping tasks
 async def crawl_deep_page(target_url: str):
     async with AsyncWebCrawler() as crawler:
         result = await crawler.arun(url=target_url)
@@ -139,13 +143,13 @@ def generate_fallback_listings(query: str) -> dict:
         base_price = 29990.0
     elif "milk" in lower_query:
         title = "Amul Taaza Toned Milk (1L)"
-        base_price = 72.0;
+        base_price = 72.0
     elif "atta" in lower_query:
         title = "Aashirvaad Shudh Chakki Atta (5kg)"
         base_price = 255.0
-    elif "phone" in lower_query or "mobile" in lower_query:
-        title = "Smart Android 5G Smartphone"
-        base_price = 19999.0
+    elif "phone" in lower_query or "mobile" in lower_query or "pixel" in lower_query or "google" in lower_query:
+        title = "Google Pixel 8 (128 GB)" if "pixel" in lower_query else "Smart Android 5G Smartphone"
+        base_price = 75999.0 if "pixel" in lower_query else 19999.0
     else:
         title = query.title()
         base_price = 499.0
