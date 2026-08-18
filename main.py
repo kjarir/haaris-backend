@@ -1,16 +1,14 @@
-import re
-import urllib.parse
-import random
-from datetime import datetime
+import os
+import json
 from typing import List, Optional
-from fastapi import FastAPI, Query
+from datetime import datetime
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
-from bs4 import BeautifulSoup
 from pydantic import BaseModel
-from crawl4ai import AsyncWebCrawler
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 
-app = FastAPI(title="Smart Price Aggregator Backend")
+app = FastAPI(title="Smart Price Aggregator Static Dataset Backend")
 
 # Enable CORS for Flutter Client
 app.add_middleware(
@@ -41,289 +39,108 @@ class SearchResponse(BaseModel):
     product: Optional[Product]
     listings: List[Listing]
 
-# Regex helper to parse price strings
-def extract_price(text: str) -> Optional[float]:
-    if not text:
-        return None
-    match = re.search(r'(?:₹|Rs\.?|INR)\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d{2})?|\d{2,})', text, re.IGNORECASE)
-    if match:
-        clean_price = match.group(1).replace(",", "")
-        try:
-            parsed = float(clean_price)
-            if parsed > 5:
-                return parsed
-        except ValueError:
-            pass
-    return None
+# Load Static Kaggle Dataset
+DATASET_PATH = os.path.join(os.path.dirname(__file__), "kaggle_seeded_dataset.json")
+try:
+    with open(DATASET_PATH, "r") as f:
+        database = json.load(f)
+except Exception as e:
+    print(f"Error loading local Kaggle dataset: {e}")
+    database = {"products": []}
 
-def extract_product_meta(title: str):
-    brand = "Generic"
-    lower_title = title.lower()
-
-    if "apple" in lower_title or "iphone" in lower_title:
-        brand = "Apple"
-    elif "sony" in lower_title:
-        brand = "Sony"
-    elif "oneplus" in lower_title:
-        brand = "OnePlus"
-    elif "samsung" in lower_title:
-        brand = "Samsung"
-    elif "amul" in lower_title:
-        brand = "Amul"
-    elif "aashirvaad" in lower_title:
-        brand = "Aashirvaad"
-
-    category = "Shopping"
-    if any(x in lower_title for x in ["phone", "mobile", "5g", "gb"]):
-        category = "Electronics / Mobiles"
-    elif any(x in lower_title for x in ["headphones", "earbuds", "wireless"]):
-        category = "Electronics / Audio"
-    elif any(x in lower_title for x in ["milk", "atta", "bread", "grocery"]):
-        category = "Grocery & Essentials"
-
-    return brand, category
-
-# Helper to extract actual product image from listing page (OpenGraph or img tags)
-async def fetch_product_image(url: str) -> Optional[str]:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
-    }
-    try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            response = await client.get(url, headers=headers, follow_redirects=True)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Check OpenGraph Image tag
-                og_img = soup.find("meta", property="og:image")
-                if og_img and og_img.get("content"):
-                    return og_img["content"]
-                
-                # Check twitter image tag
-                tw_img = soup.find("meta", name="twitter:image")
-                if tw_img and tw_img.get("content"):
-                    return tw_img["content"]
-
-                # E-commerce platform specific main selectors
-                if "amazon.in" in url or "amazon.com" in url:
-                    img_tag = soup.find("img", id="landingImage") or soup.find("img", id="main-image")
-                    if img_tag and img_tag.get("src"):
-                        return img_tag["src"]
-                elif "flipkart.com" in url:
-                    img_tag = soup.find("img", class_="_396cs") or soup.find("img", class_="_2rPIXM")
-                    if img_tag and img_tag.get("src"):
-                        return img_tag["src"]
-    except Exception as e:
-        print(f"Error extracting image from {url}: {e}")
-    return None
-
-# HTTPX based fetcher to prevent Playwright hangs on Render container
-async def fetch_ddg_results(query: str) -> list:
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            response = await client.get(url, headers=headers)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                results = []
-                for result in soup.select('.result'):
-                    title_elem = result.select_one('.result__title a')
-                    snippet_elem = result.select_one('.result__snippet')
-
-                    if title_elem and title_elem.get('href'):
-                        title = title_elem.get_text().strip()
-                        raw_url = title_elem.get('href')
-                        snippet = snippet_elem.get_text().strip() if snippet_elem else ""
-
-                        clean_url = raw_url
-                        if raw_url.startswith('//duckduckgo.com/l/?uddg='):
-                            match = re.search(r'uddg=([^&]+)', raw_url)
-                            if match:
-                                clean_url = urllib.parse.unquote(match.group(1))
-
-                        results.append({
-                            "title": title,
-                            "url": clean_url,
-                            "snippet": snippet
-                        })
-                return results
-    except Exception as e:
-        print(f"Error fetching DuckDuckGo results: {e}")
-    return []
-
-# Crawl4AI Deep Scraper integration is available here for custom scraping tasks
-async def crawl_deep_page(target_url: str):
-    async with AsyncWebCrawler() as crawler:
-        result = await crawler.arun(url=target_url)
-        return result.markdown
-
-def generate_fallback_listings(query: str) -> dict:
-    lower_query = query.lower()
-    
-    # Estimate a realistic base price based on keywords in the user's search
-    base_price = 499.0
-    if "laptop" in lower_query or "macbook" in lower_query:
-        base_price = 55000.0
-    elif "iphone" in lower_query or "pixel" in lower_query or "galaxy s" in lower_query:
-        base_price = 74999.0
-    elif "phone" in lower_query or "mobile" in lower_query or "smartphone" in lower_query:
-        base_price = 19999.0
-    elif "sony" in lower_query or "headphones" in lower_query or "earbuds" in lower_query:
-        base_price = 15990.0
-    elif "milk" in lower_query or "bread" in lower_query:
-        base_price = 68.0
-    elif "atta" in lower_query or "rice" in lower_query:
-        base_price = 280.0
-
-    # Always preserve the exact capitalized query title
-    title = query.title()
-
-    sellers = [
-        {"name": "Amazon India", "path": "https://www.amazon.in/s?k="},
-        {"name": "Flipkart", "path": "https://www.flipkart.com/search?q="},
-        {"name": "Meesho", "path": "https://www.meesho.com/search?q="},
-        {"name": "Zepto", "path": "https://www.zepto.co/search?query="}
+# Crawl4AI Configuration for Background Crawls (Bonus / Reference)
+# Using JsonCssExtractionStrategy for structured page extraction
+product_schema = {
+    "name": "E-Commerce Product details",
+    "baseSelector": "body",
+    "fields": [
+        {"name": "title", "selector": "h1", "type": "text"},
+        {"name": "price", "selector": ".a-price-whole, ._30jeq3", "type": "text"},
+        {"name": "in_stock", "selector": "#availability", "type": "text"}
     ]
+}
 
-    brand, category = extract_product_meta(title)
+browser_config = BrowserConfig(
+    headless=True,
+    ignore_https_errors=True
+)
 
-    imageUrl = "https://images.unsplash.com/photo-1546213290-e1b7610339e5?auto=format&fit=crop&q=80&w=200"
-    if "Mobiles" in category:
-        imageUrl = "https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?auto=format&fit=crop&q=80&w=200"
-    elif "Audio" in category:
-        imageUrl = "https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&q=80&w=200"
-    elif "Grocery" in category:
-        imageUrl = "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&q=80&w=200"
+crawler_run_config = CrawlerRunConfig(
+    extraction_strategy=JsonCssExtractionStrategy(schema=product_schema),
+    word_count_threshold=10,
+    always_by_pass_cache=True
+)
 
-    return {
-        "product": {
-            "id": query.lower().replace(" ", "_"),
-            "title": title,
-            "brand": brand,
-            "category": category,
-            "imageUrl": imageUrl
-        },
-        "listings": [
-            {
-                "id": f"fallback_{i}",
-                "sellerName": seller["name"],
-                "price": round(base_price * (0.94 + random.random() * 0.1), 1),
-                "currency": "INR",
-                "url": seller["path"] + urllib.parse.quote(query),
-                "inStock": True,
-                "lastCheckedAt": datetime.now().isoformat()
-            } for i, seller in enumerate(sellers)
-        ]
-    }
+async def background_crawl_job(target_url: str):
+    """
+    Scheduled background crawler task using Crawl4AI JsonCssExtractionStrategy.
+    """
+    print(f"Starting scheduled crawl on: {target_url}")
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        result = await crawler.arun(url=target_url, config=crawler_run_config)
+        if result.success:
+            print("Extracted Data:", result.extracted_content)
+            return result.extracted_content
+    return None
 
 @app.get("/search", response_model=SearchResponse)
-async def search_prices(q: str = Query(..., description="Product query to search")):
-    query = q.strip()
-    print(f"Processing real-time search: {query}")
+async def search_dataset(q: str = Query(..., description="Product query to search")):
+    query = q.strip().lower()
+    print(f"Processing database lookup search for: '{query}'")
 
-    search_query = f"{query} price India"
-    raw_results = await fetch_ddg_results(search_query)
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query is required")
 
-    listings = []
-    matched_product_title = query
-    highest_word_overlap = 0
-    primary_listing_url = None
+    best_match = None
+    highest_score = 0
 
-    for item in raw_results:
-        lower_url = item["url"].lower()
-        seller_name = ""
+    # Clean query to extract matchable tokens
+    query_tokens = set(query.split())
 
-        if "amazon.in" in lower_url or "amazon.com" in lower_url:
-            seller_name = "Amazon India"
-        elif "flipkart.com" in lower_url:
-            seller_name = "Flipkart"
-        elif "meesho.com" in lower_url:
-            seller_name = "Meesho"
-        elif "blinkit.com" in lower_url:
-            seller_name = "Blinkit"
-        elif "zepto.co" in lower_url:
-            seller_name = "Zepto"
+    for item in database.get("products", []):
+        title_lower = item["title"].lower()
+        brand_lower = item["brand"].lower()
+        id_lower = item["id"].lower()
 
-        if not seller_name:
-            continue
+        # Simple overlap scoring
+        score = 0
+        for token in query_tokens:
+            if token in title_lower:
+                score += 2
+            if token in brand_lower:
+                score += 1
+            if token in id_lower:
+                score += 2
 
-        price = extract_price(item["title"])
-        if not price:
-            price = extract_price(item["snippet"])
+        if score > highest_score:
+            highest_score = score
+            best_match = item
 
-        if seller_name in ["Amazon India", "Flipkart"]:
-            words_len = len(item["title"].split())
-            if words_len > highest_word_overlap:
-                highest_word_overlap = words_len
-                matched_product_title = item["title"].split("|")[0].split("(")[0].strip()
-                primary_listing_url = item["url"]
-
-        listings.append(
-            Listing(
-                id=f"ddg_{random.randint(1000, 9999)}",
-                sellerName=seller_name,
-                price=price or 0.0,
-                url=item["url"],
-                inStock="out of stock" not in item["snippet"].lower(),
-                lastCheckedAt=datetime.now().isoformat()
-            )
+    # Threshold for matching to prevent arbitrary incorrect query bindings
+    if best_match and highest_score >= 2:
+        print(f"Match found in static Kaggle dataset: {best_match['title']}")
+        product = Product(
+            id=best_match["id"],
+            title=best_match["title"],
+            brand=best_match["brand"],
+            category=best_match["category"],
+            imageUrl=best_match["imageUrl"]
         )
+        listings = [
+            Listing(
+                id=l["id"],
+                sellerName=l["sellerName"],
+                price=l["price"],
+                currency=l["currency"],
+                url=l["url"],
+                inStock=l["inStock"],
+                lastCheckedAt=l["lastCheckedAt"]
+            ) for l in best_match.get("listings", [])
+        ]
+        return SearchResponse(product=product, listings=listings)
 
-    # Fallback to dynamic data generator if scraper gets zero results
-    if not listings:
-        print("Scraper returned 0 results. Triggering dynamic fallback.")
-        fallback = generate_fallback_listings(query)
-        return fallback
-
-    # Add realistic price fallbacks to listings with 0.0 or low accessory prices
-    for l in listings:
-        is_high_value = any(x in query.lower() for x in ["iphone", "phone", "pixel", "sony", "laptop"])
-        if l.price == 0.0 or (is_high_value and l.price < 5000.0):
-            base = 500.0
-            if "iphone" in query.lower():
-                base = 69900.0
-            elif "pixel" in query.lower():
-                base = 75999.0
-            elif "phone" in query.lower():
-                base = 19999.0
-            elif "sony" in query.lower():
-                base = 29990.0
-            l.price = round(base * (0.95 + random.random() * 0.1), 1)
-
-    brand, category = extract_product_meta(matched_product_title)
-
-    imageUrl = None
-    if primary_listing_url:
-        print(f"Fetching real-time product image from primary url: {primary_listing_url}")
-        imageUrl = await fetch_product_image(primary_listing_url)
-
-    if not imageUrl:
-        imageUrl = "https://images.unsplash.com/photo-1546213290-e1b7610339e5?auto=format&fit=crop&q=80&w=200"
-        if "Mobiles" in category:
-            imageUrl = "https://images.unsplash.com/photo-1510557880182-3d4d3cba35a5?auto=format&fit=crop&q=80&w=200"
-        elif "Audio" in category:
-            imageUrl = "https://images.unsplash.com/photo-1546435770-a3e426bf472b?auto=format&fit=crop&q=80&w=200"
-        elif "Grocery" in category:
-            imageUrl = "https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&q=80&w=200"
-
-    product = Product(
-        id=query.lower().replace(" ", "_"),
-        title=matched_product_title,
-        brand=brand,
-        category=category,
-        imageUrl=imageUrl
-    )
-
-    return SearchResponse(product=product, listings=listings)
+    print("No matching product found in Kaggle dataset. Returning empty state.")
+    return SearchResponse(product=None, listings=[])
 
 if __name__ == "__main__":
     import uvicorn
