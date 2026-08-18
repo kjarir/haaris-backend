@@ -1,9 +1,11 @@
 import os
 import json
 from typing import List, Optional, Dict
+from datetime import datetime
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import httpx
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from crawl4ai.extraction_strategy import JsonCssExtractionStrategy
 
@@ -41,7 +43,7 @@ class SearchResponse(BaseModel):
     product: Optional[Product]
     listings: List[Listing]
 
-# Merged Database Store
+# Merged Database Store (Fallback database)
 merged_database = []
 
 # Load Hand-Curated Verified Dataset
@@ -70,6 +72,10 @@ try:
         print("Generated Kaggle dataset file not found. Run scripts/build_dataset.py first.")
 except Exception as e:
     print(f"Error loading generated Kaggle dataset: {e}")
+
+# SearchApi.io Config
+SEARCHAPI_KEY = "r7MunZoUvuNCepWGptEyjApy"
+SEARCHAPI_URL = "https://www.searchapi.io/api/v1/search"
 
 # Crawl4AI Configuration for Background Crawls (Bonus / Reference)
 product_schema = {
@@ -105,18 +111,10 @@ async def background_crawl_job(target_url: str):
             return result.extracted_content
     return None
 
-@app.get("/search", response_model=SearchResponse)
-async def search_dataset(q: str = Query(..., description="Product query to search")):
-    query = q.strip().lower()
-    print(f"Processing lookup search for: '{query}'")
-
-    if not query:
-        raise HTTPException(status_code=400, detail="Search query is required")
-
+def fallback_local_search(query: str) -> SearchResponse:
+    print(f"Falling back to local dataset query match for: '{query}'")
     best_match = None
     highest_score = 0
-
-    # Clean query to extract matchable tokens
     query_tokens = set(query.split())
 
     for item in merged_database:
@@ -124,7 +122,6 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
         brand_lower = item["brand"].lower()
         id_lower = item["id"].lower()
 
-        # Simple overlap scoring
         score = 0
         for token in query_tokens:
             if token in title_lower:
@@ -138,9 +135,7 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
             highest_score = score
             best_match = item
 
-    # Threshold for matching
     if best_match and highest_score >= 2:
-        print(f"Match found: {best_match['title']} (Verified: {best_match['verified']})")
         product = Product(
             id=best_match["id"],
             title=best_match["title"],
@@ -164,8 +159,91 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
         ]
         return SearchResponse(product=product, listings=listings)
 
-    print("No matching product found in unified index. Returning empty state.")
     return SearchResponse(product=None, listings=[])
+
+@app.get("/search", response_model=SearchResponse)
+async def search_dataset(q: str = Query(..., description="Product query to search")):
+    query = q.strip().lower()
+    print(f"Received live shopping search request: '{query}'")
+
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query is required")
+
+    # Try Live SearchApi.io Shopping Query first
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            params = {
+                "engine": "google_shopping",
+                "q": query,
+                "gl": "in",
+                "hl": "en",
+                "api_key": SEARCHAPI_KEY
+            }
+            response = await client.get(SEARCHAPI_URL, params=params)
+            
+            if response.status_code == 200:
+                data = response.json()
+                shopping_results = data.get("shopping_results", [])
+                
+                if shopping_results:
+                    first_item = shopping_results[0]
+                    # Guess category dynamically based on search keywords
+                    category = "Electronics / Mobiles"
+                    if "headphone" in query or "earbud" in query or "audio" in query:
+                        category = "Electronics / Audio"
+                    elif "tv" in query or "television" in query:
+                        category = "Electronics / TV"
+                    elif "milk" in query or "atta" in query or "oil" in query or "chocolate" in query or "grocery" in query:
+                        category = "Grocery & Essentials"
+
+                    # Generate spec tags based on title if possible
+                    specs = {}
+                    title_lower = first_item.get("title", "").lower()
+                    for ram_val in ["4gb", "8gb", "12gb", "16gb", "32gb"]:
+                        if ram_val in title_lower:
+                            specs["RAM"] = ram_val.upper()
+                            break
+                    for storage_val in ["64gb", "128gb", "256gb", "512gb", "1tb"]:
+                        if storage_val in title_lower:
+                            specs["Storage"] = storage_val.upper()
+                            break
+
+                    product = Product(
+                        id=f"live_{first_item.get('product_id', 'id')}",
+                        title=first_item.get("title", query.title()),
+                        brand=first_item.get("seller", "Generic"),
+                        category=category,
+                        imageUrl=first_item.get("thumbnail", ""),
+                        verified=True, # Sourced in real-time from active Google index!
+                        specs=specs
+                    )
+
+                    listings = []
+                    for index, item in enumerate(shopping_results):
+                        extracted_price = item.get("extracted_price")
+                        if not extracted_price:
+                            continue
+                        
+                        listings.append(Listing(
+                            id=f"live_offer_{index}_{item.get('product_id', '')}",
+                            sellerName=item.get("seller", "Google Shopping Seller"),
+                            price=float(extracted_price),
+                            currency="INR",
+                            url=item.get("product_link") or item.get("offers_link") or "",
+                            inStock=True,
+                            lastCheckedAt=datetime.now().isoformat(),
+                            linkType="direct" # Leads directly to specific product page
+                        ))
+                    
+                    if listings:
+                        print(f"Successfully returned {len(listings)} live shopping listings from Google.")
+                        return SearchResponse(product=product, listings=listings)
+
+    except Exception as e:
+        print(f"Live SearchApi query failed: {e}")
+
+    # Fallback to local database
+    return fallback_local_search(query)
 
 if __name__ == "__main__":
     import uvicorn
