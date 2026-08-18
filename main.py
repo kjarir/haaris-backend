@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Optional
+from typing import List, Optional, Dict
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,6 +25,7 @@ class Product(BaseModel):
     category: str
     imageUrl: str
     verified: bool  # Displays whether the product is hand-verified or bulk-generated
+    specs: Optional[Dict[str, str]] = None  # Key-value maps for product specifications
 
 class Listing(BaseModel):
     id: str
@@ -34,6 +35,7 @@ class Listing(BaseModel):
     url: str
     inStock: bool
     lastCheckedAt: str
+    linkType: str = "search"  # "direct" or "search"
 
 class SearchResponse(BaseModel):
     product: Optional[Product]
@@ -145,7 +147,8 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
             brand=best_match["brand"],
             category=best_match["category"],
             imageUrl=best_match["imageUrl"],
-            verified=best_match["verified"]
+            verified=best_match["verified"],
+            specs=best_match.get("specs", {})
         )
         listings = [
             Listing(
@@ -155,7 +158,8 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
                 currency=l["currency"],
                 url=l["url"],
                 inStock=l["inStock"],
-                lastCheckedAt=l["lastCheckedAt"]
+                lastCheckedAt=l["lastCheckedAt"],
+                linkType=l.get("linkType", "search")
             ) for l in best_match.get("listings", [])
         ]
         return SearchResponse(product=product, listings=listings)

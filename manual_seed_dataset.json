@@ -14,7 +14,8 @@
           "currency": "INR",
           "url": "https://www.amazon.in/dp/B0DGD9X8KL",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         },
         {
           "id": "px10_list_2",
@@ -23,9 +24,15 @@
           "currency": "INR",
           "url": "https://www.flipkart.com/google-pixel-10-5g-obsidian-256-gb/p/itm102395a892b",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         }
-      ]
+      ],
+      "specs": {
+        "RAM": "12GB",
+        "Storage": "256GB",
+        "Color": "Obsidian"
+      }
     },
     {
       "id": "apple_iphone_15",
@@ -41,7 +48,8 @@
           "currency": "INR",
           "url": "https://www.amazon.in/dp/B0CHX1W1K1",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         },
         {
           "id": "ip15_list_2",
@@ -50,9 +58,15 @@
           "currency": "INR",
           "url": "https://www.flipkart.com/apple-iphone-15-black-128-gb/p/itm2d83c1c48e8e8",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         }
-      ]
+      ],
+      "specs": {
+        "RAM": "6GB",
+        "Storage": "128GB",
+        "Color": "Black"
+      }
     },
     {
       "id": "sony_wh_1000xm5",
@@ -68,7 +82,8 @@
           "currency": "INR",
           "url": "https://www.amazon.in/dp/B09XS7JWHH",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         },
         {
           "id": "xm5_list_2",
@@ -77,9 +92,14 @@
           "currency": "INR",
           "url": "https://www.flipkart.com/sony-wh-1000xm5-active-noise-cancellation-bluetooth-headset/p/itm2da05b76ab13c",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         }
-      ]
+      ],
+      "specs": {
+        "Type": "Over-Ear",
+        "Noise Cancelling": "Yes"
+      }
     },
     {
       "id": "aashirvaad_atta",
@@ -95,7 +115,8 @@
           "currency": "INR",
           "url": "https://www.amazon.in/dp/B00V52G3T4",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         },
         {
           "id": "atta_list_2",
@@ -104,9 +125,14 @@
           "currency": "INR",
           "url": "https://www.zepto.co/p/aashirvaad-shudh-chakki-atta-5-kg/pr-5ad8a73b-bfd0-4d43",
           "inStock": true,
-          "lastCheckedAt": "2026-08-18T13:00:00Z"
+          "lastCheckedAt": "2026-08-18T13:00:00Z",
+          "linkType": "direct"
         }
-      ]
+      ],
+      "specs": {
+        "Weight": "5kg",
+        "Type": "Whole Wheat"
+      }
     }
   ]
 }
