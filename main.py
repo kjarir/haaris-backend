@@ -163,42 +163,74 @@ def _local_search(query: str) -> SearchResponse:
 # Main live search endpoint
 # ────────────────────────────────────────────────────
 
+def _parse_budget(query: str):
+    """
+    Detect budget constraint from query strings like:
+      'phone under 15k', 'laptop below 50000', 'tv under 30k'
+    Returns (clean_query, max_price_inr) or (query, None) if no budget found.
+    """
+    import re
+    # Match patterns like "under 15k", "below 20000", "within 10k", "less than 30k"
+    pattern = r'\b(?:under|below|within|less than|upto|up to)\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)\s*(k|thousand|lakh)?\b'
+    m = re.search(pattern, query.lower())
+    if m:
+        value = float(m.group(1))
+        unit = (m.group(2) or '').lower()
+        if unit in ('k', 'thousand'):
+            value *= 1000
+        elif unit == 'lakh':
+            value *= 100000
+        clean = re.sub(pattern, '', query, flags=re.IGNORECASE).strip()
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        return clean, int(value)
+    return query, None
+
+
 @app.get("/search", response_model=SearchResponse)
 async def search(q: str = Query(..., description="Product search query")):
     query = q.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
-    print(f"[search] '{query}'")
+    # Parse budget hint from query (e.g. "phone under 15k" → max_price=15000)
+    clean_query, max_price = _parse_budget(query)
+    if not clean_query:
+        clean_query = query
+
+    print(f"[search] '{query}' → clean='{clean_query}' budget={max_price}")
 
     # ── 1. Try SearchApi.io Google Shopping (India) ──────────────────────────
     try:
+        params: dict = {
+            "engine": "google_shopping",
+            "q": clean_query,
+            "gl": "in",
+            "hl": "en",
+            "api_key": SEARCHAPI_KEY,
+        }
+        # Add Google Shopping price filter if budget detected
+        if max_price:
+            # tbs=mr:1,price:1,ppr_max:XXXXX  (max price in same currency as results)
+            params["tbs"] = f"mr:1,price:1,ppr_max:{max_price}"
+
         async with httpx.AsyncClient(timeout=12.0) as client:
-            resp = await client.get(
-                SEARCHAPI_URL,
-                params={
-                    "engine": "google_shopping",
-                    "q": query,
-                    "gl": "in",
-                    "hl": "en",
-                    "api_key": SEARCHAPI_KEY,
-                },
-            )
+            resp = await client.get(SEARCHAPI_URL, params=params)
+
         if resp.status_code == 200:
             data = resp.json()
             results = data.get("shopping_results", [])
             if results:
                 first = results[0]
-                category = _infer_category(query)
+                category = _infer_category(clean_query)
                 specs = _extract_specs(first.get("title", ""))
 
                 product = Product(
                     id=f"live_{first.get('product_id', 'unknown')}",
-                    title=first.get("title", query.title()),
+                    title=first.get("title", clean_query.title()),
                     brand=first.get("seller", "Various"),
                     category=category,
                     imageUrl=first.get("thumbnail", ""),
-                    verified=True,   # Real-time from Google index
+                    verified=True,
                     specs=specs,
                 )
 
@@ -206,6 +238,9 @@ async def search(q: str = Query(..., description="Product search query")):
                 for i, item in enumerate(results):
                     price = item.get("extracted_price")
                     if not price:
+                        continue
+                    # Honour the budget filter: skip listings above max_price
+                    if max_price and float(price) > max_price * 1.05:
                         continue
                     url = item.get("product_link") or item.get("offers_link") or ""
                     listings.append(
@@ -231,7 +266,8 @@ async def search(q: str = Query(..., description="Product search query")):
         print(f"[search] Live query error: {exc}")
 
     # ── 2. Fallback to local database ────────────────────────────────────────
-    return _local_search(query)
+    return _local_search(clean_query)
+
 
 
 @app.get("/health")
