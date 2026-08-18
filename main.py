@@ -1,7 +1,6 @@
 import os
 import json
 from typing import List, Optional
-from datetime import datetime
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,6 +24,7 @@ class Product(BaseModel):
     brand: str
     category: str
     imageUrl: str
+    verified: bool  # Displays whether the product is hand-verified or bulk-generated
 
 class Listing(BaseModel):
     id: str
@@ -39,17 +39,37 @@ class SearchResponse(BaseModel):
     product: Optional[Product]
     listings: List[Listing]
 
-# Load Static Kaggle Dataset
-DATASET_PATH = os.path.join(os.path.dirname(__file__), "kaggle_seeded_dataset.json")
+# Merged Database Store
+merged_database = []
+
+# Load Hand-Curated Verified Dataset
+MANUAL_PATH = os.path.join(os.path.dirname(__file__), "manual_seed_dataset.json")
 try:
-    with open(DATASET_PATH, "r") as f:
-        database = json.load(f)
+    with open(MANUAL_PATH, "r") as f:
+        manual_data = json.load(f)
+        for item in manual_data.get("products", []):
+            item["verified"] = True
+            merged_database.append(item)
+    print(f"Loaded {len(manual_data.get('products', []))} hand-verified products.")
 except Exception as e:
-    print(f"Error loading local Kaggle dataset: {e}")
-    database = {"products": []}
+    print(f"Error loading manual verified dataset: {e}")
+
+# Load Bulk Kaggle Generated Dataset
+KAGGLE_PATH = os.path.join(os.path.dirname(__file__), "kaggle_seed_dataset_generated.json")
+try:
+    if os.path.exists(KAGGLE_PATH):
+        with open(KAGGLE_PATH, "r") as f:
+            kaggle_data = json.load(f)
+            for item in kaggle_data.get("products", []):
+                item["verified"] = False
+                merged_database.append(item)
+        print(f"Loaded {len(kaggle_data.get('products', []))} bulk generated products.")
+    else:
+        print("Generated Kaggle dataset file not found. Run scripts/build_dataset.py first.")
+except Exception as e:
+    print(f"Error loading generated Kaggle dataset: {e}")
 
 # Crawl4AI Configuration for Background Crawls (Bonus / Reference)
-# Using JsonCssExtractionStrategy for structured page extraction
 product_schema = {
     "name": "E-Commerce Product details",
     "baseSelector": "body",
@@ -86,7 +106,7 @@ async def background_crawl_job(target_url: str):
 @app.get("/search", response_model=SearchResponse)
 async def search_dataset(q: str = Query(..., description="Product query to search")):
     query = q.strip().lower()
-    print(f"Processing database lookup search for: '{query}'")
+    print(f"Processing lookup search for: '{query}'")
 
     if not query:
         raise HTTPException(status_code=400, detail="Search query is required")
@@ -97,7 +117,7 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
     # Clean query to extract matchable tokens
     query_tokens = set(query.split())
 
-    for item in database.get("products", []):
+    for item in merged_database:
         title_lower = item["title"].lower()
         brand_lower = item["brand"].lower()
         id_lower = item["id"].lower()
@@ -116,15 +136,16 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
             highest_score = score
             best_match = item
 
-    # Threshold for matching to prevent arbitrary incorrect query bindings
+    # Threshold for matching
     if best_match and highest_score >= 2:
-        print(f"Match found in static Kaggle dataset: {best_match['title']}")
+        print(f"Match found: {best_match['title']} (Verified: {best_match['verified']})")
         product = Product(
             id=best_match["id"],
             title=best_match["title"],
             brand=best_match["brand"],
             category=best_match["category"],
-            imageUrl=best_match["imageUrl"]
+            imageUrl=best_match["imageUrl"],
+            verified=best_match["verified"]
         )
         listings = [
             Listing(
@@ -139,7 +160,7 @@ async def search_dataset(q: str = Query(..., description="Product query to searc
         ]
         return SearchResponse(product=product, listings=listings)
 
-    print("No matching product found in Kaggle dataset. Returning empty state.")
+    print("No matching product found in unified index. Returning empty state.")
     return SearchResponse(product=None, listings=[])
 
 if __name__ == "__main__":
